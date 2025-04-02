@@ -11,6 +11,7 @@ library(readr)
 library(dplyr)
 library(ggplot2)
 library(tidyr)
+library(randomForest)
 ```
 
 ```{R}
@@ -178,4 +179,85 @@ num_data <- num_data[complete.cases(num_data), ]  # optional: remove rows w/ NAs
 # Basic correlation matrix
 cor(num_data)
 
+```
+```{R}
+titanic_clean <- titanic %>%
+  select(-c(Name, Ticket, Cabin, Fare, Embarked))  # or Cabin as well if present
+
+titanic_clean <- titanic_clean %>%
+  mutate(
+    Survived = factor(Survived, levels = c(0,1)),
+    Pclass   = factor(Pclass,  levels = c(1,2,3), ordered = TRUE),
+    Sex      = factor(Sex,     levels = c("male","female"))
+  )
+
+median_age <- median(titanic_clean$Age, na.rm = TRUE)
+titanic_clean$Age[is.na(titanic_clean$Age)] <- median_age
+```
+
+```{R}
+rf_model <- randomForest(
+  Survived ~ Pclass + Sex + Age + SibSp + Parch,
+  data    = titanic_clean,
+  ntree   = 500,       # default is 500, can adjust
+  mtry    = 2,         # default ~ sqrt(#predictors), can tune
+  importance = TRUE     # request variable importance
+)
+
+# Print the model summary
+print(rf_model)
+
+# Check variable importance
+importance(rf_model)
+varImpPlot(rf_model)
+```
+
+```{R}
+# Read the test data
+test_data <- read.csv("/Users/lincolnmercuro/Downloads/titanic/test.csv", stringsAsFactors = FALSE)
+
+# Perform similar cleaning as done on the training data:
+# For example, keep only the columns you'll use,
+# convert appropriate columns to factors, and impute missing values.
+test_clean <- test_data %>%
+  # Select only columns needed for prediction. Adjust if needed.
+  select(PassengerId, Pclass, Sex, Age, SibSp, Parch, Fare, Embarked) %>%
+  mutate(
+    Pclass = factor(Pclass, levels = c(1, 2, 3), ordered = TRUE),
+    Sex    = factor(Sex, levels = c("male", "female"))
+  )
+
+# Impute missing Age values with the median Age from the training set
+# (Assuming you calculated this from your cleaned training data, titanic_clean)
+median_age <- median(titanic_clean$Age, na.rm = TRUE)
+test_clean$Age[is.na(test_clean$Age)] <- median_age
+
+# Similarly, you might need to handle missing Fare or Embarked values if they exist:
+# For example:
+# test_clean$Fare[is.na(test_clean$Fare)] <- median(test_clean$Fare, na.rm = TRUE)
+# test_clean$Embarked[test_clean$Embarked == ""] <- "S"   # if "S" is the most common port
+
+#############################################
+# STEP 2: Generate Predictions with rf_model
+#############################################
+
+# Use the previously trained random forest model (rf_model) to predict Survival.
+# (Make sure rf_model was trained on similar feature columns)
+predictions <- predict(rf_model, newdata = test_clean)
+
+#############################################
+# STEP 3: Create a Submission File
+#############################################
+
+# Create a data frame with PassengerId and Survived predictions.
+submission <- data.frame(
+  PassengerId = test_clean$PassengerId,
+  Survived = predictions
+)
+
+# Preview the submission
+head(submission)
+
+# Write the submission to a CSV file (without row names)
+write.csv(submission, file = "submission.csv", row.names = FALSE)
 ```
