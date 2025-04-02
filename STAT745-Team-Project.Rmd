@@ -7,24 +7,175 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
 ```
 
-## R Markdown
-
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
-
-```{r cars}
-summary(cars)
+```{R}
+titanic <- read.csv("/Users/lincolnmercuro/Downloads/titanic/train.csv")
+head(data)
 ```
 
-## Including Plots
+```{R}
+str(titanic)
 
-You can also embed plots, for example:
+# Count missing values in each column
+colSums(is.na(titanic))
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+# Summary statistics of numeric variables
+summary(titanic)
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{R}
+# Quick table of Survived
+table(titanic$Survived)
+```
+
+```{R}
+########################################
+# 3) Visualize Missing Data
+########################################
+
+# A fast way to check missingness distribution is to reshape or do a simple bar plot:
+titanic_miss <- titanic %>%
+  mutate(
+    Age_miss = is.na(Age),
+    # (Repeat for other columns if you want)
+  )
+
+ggplot(titanic_miss, aes(x = Age_miss)) +
+  geom_bar() +
+  labs(
+    x = "Is Age Missing?",
+    y = "Count",
+    title = "Count of Missing vs. Not-Missing Age"
+  )
+
+# Alternatively, packages like naniar or VIM can create specialized missing-data plots.
+```
+
+```{R}
+########################################
+# 4) Univariate Distributions
+########################################
+
+# A) Distribution of Age
+ggplot(titanic, aes(x = Age)) +
+  geom_histogram(bins = 30, na.rm = TRUE) +
+  labs(
+    title = "Distribution of Passengers' Age",
+    x = "Age",
+    y = "Count"
+  )
+
+# B) Distribution of Fare (if you have "Fare" column)
+# (If 'Fare' isn't in your snippet, just skip)
+if ("Fare" %in% colnames(titanic)) {
+  ggplot(titanic, aes(x = Fare)) +
+    geom_histogram(bins = 30, na.rm = TRUE) +
+    labs(
+      title = "Distribution of Ticket Fare",
+      x = "Fare",
+      y = "Count"
+    )
+}
+
+# C) Categorical distribution: Sex
+ggplot(titanic, aes(x = Sex)) +
+  geom_bar() +
+  labs(
+    title = "Passenger Count by Sex",
+    x = "Sex",
+    y = "Count"
+  )
+
+# D) Passenger Class
+ggplot(titanic, aes(x = factor(Pclass))) +
+  geom_bar() +
+  labs(
+    title = "Passenger Count by Class",
+    x = "Passenger Class",
+    y = "Count"
+  )
+```
+
+```{R}
+########################################
+# 5) Bivariate Distributions
+########################################
+
+# A) Survival Rate by Sex
+ggplot(titanic, aes(x = Sex, fill = factor(Survived))) +
+  geom_bar(position = "fill") +  # "fill" shows proportions
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Proportion Survived by Sex",
+    x = "Sex",
+    y = "Proportion",
+    fill = "Survived"
+  )
+
+# B) Survival Rate by Passenger Class
+ggplot(titanic, aes(x = factor(Pclass), fill = factor(Survived))) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(
+    title = "Proportion Survived by Class",
+    x = "Passenger Class",
+    y = "Proportion",
+    fill = "Survived"
+  )
+
+# C) Age vs Survived: boxplot
+ggplot(titanic, aes(x = factor(Survived), y = Age)) +
+  geom_boxplot(na.rm = TRUE) +
+  labs(
+    title = "Boxplot of Age by Survived",
+    x = "Survived",
+    y = "Age"
+  )
+
+# D) Age vs Fare (if Fare exists) with color = Survived
+# This shows a possible relationship among Age, Fare, and Survival
+if ("Fare" %in% colnames(titanic)) {
+  ggplot(titanic, aes(x = Age, y = Fare, color = factor(Survived))) +
+    geom_point(na.rm = TRUE, alpha = 0.6) +
+    labs(
+      title = "Age vs. Fare (colored by Survival)",
+      x = "Age",
+      y = "Fare",
+      color = "Survived"
+    )
+}
+```
+
+```{R}
+########################################
+# 6) Grouped Summaries & Additional Checks
+########################################
+
+# Group by Class and Sex, then look at average Age, Survived rate
+titanic %>%
+  group_by(Pclass, Sex) %>%
+  summarize(
+    Avg_Age       = mean(Age, na.rm = TRUE),
+    Survived_Rate = mean(Survived, na.rm = TRUE),
+    n             = n()
+  ) %>%
+  arrange(Pclass, Sex)
+
+# Correlation among numerical columns (Age, SibSp, Parch, Fare, etc.)
+# (Will ignore Survived in the correlation for now, as it's 0/1)
+num_cols <- c("Age", "SibSp", "Parch")
+if ("Fare" %in% colnames(titanic)) {
+  num_cols <- c(num_cols, "Fare")
+}
+num_data <- titanic[, num_cols]
+num_data <- num_data[complete.cases(num_data), ]  # optional: remove rows w/ NAs
+
+# Basic correlation matrix
+cor(num_data)
+
+```
