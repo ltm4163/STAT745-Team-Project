@@ -21,7 +21,7 @@ set.seed(123)        # for reproducibility
 ```
 
 ```{R}
-titanic <- read.csv("/Users/lincolnmercuro/Downloads/titanic/train.csv")
+titanic <- read.csv("train.csv")
 head(titanic)
 ```
 
@@ -185,10 +185,10 @@ clean_titanic <- function(df, is_train = TRUE) {
     mutate(
       Title = sub("^.*, (.*?)\\..*$", "\\1", Name),
       Title = case_when(
-        Title %in% c("Mlle","Ms")                        ~ "Miss",
-        Title %in% c("Mme","Countess","Lady","Dona")     ~ "Mrs",
+        Title %in% c("Mlle","Ms", "Miss", "Mrs")                        ~ "Other",
+        Title %in% c("Mme","Countess","Lady","Dona")     ~ "Other",
         Title %in% c("Capt","Col","Major","Dr","Rev",
-                     "Don","Sir","Jonkheer","the Countess") ~ "Rare",
+                     "Don","Sir","Jonkheer","the Countess") ~ "Other",
         TRUE                                             ~ Title
       ),
       Title = factor(Title)
@@ -317,7 +317,7 @@ tune_grid_xgb <- expand.grid(
 set.seed(123)
 suppressWarnings({
   xgb_expanded <- train(
-    Survived ~ Pclass + Sex + Age + FamilySize + LogFare + Title + SibSp,
+    Survived ~ Pclass + Sex + Age + FamilySize + LogFare + Title,
     data      = titanic_clean,
     method    = "xgbTree",
     trControl = train_control_xgb,
@@ -326,7 +326,9 @@ suppressWarnings({
     tuneLength = 25
   )
 })
+```
 
+```{R}
 xgb_expanded
 # Check best results
 best_xgb <- xgb_expanded$bestTune
@@ -339,8 +341,18 @@ accuracy_xgb
 
 
 ```{R}
+importance_caret <- varImp(xgb_expanded, scale = FALSE)
+
+# Print the top variables
+print(importance_caret)
+
+# Plot the importance
+plot(importance_caret)  # show top 10
+```
+
+```{R}
 # Read the test data
-test_data <- read.csv("/Users/lincolnmercuro/Downloads/titanic/test.csv", stringsAsFactors = FALSE)
+test_data <- read.csv("test.csv", stringsAsFactors = FALSE)
 
 test_clean <- clean_titanic(test_data, is_train=FALSE)
 
