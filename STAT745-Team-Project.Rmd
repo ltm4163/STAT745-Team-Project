@@ -12,11 +12,17 @@ library(dplyr)
 library(ggplot2)
 library(tidyr)
 library(randomForest)
+library(caretEnsemble)
+library(ranger)      # for method = "ranger" in caret
+library(caret)       # for easy model tuning and cross-validation
+library(xgboost)     # for gradient boosting
+library(Matrix)
+set.seed(123)        # for reproducibility
 ```
 
 ```{R}
 titanic <- read.csv("/Users/lincolnmercuro/Downloads/titanic/train.csv")
-head(data)
+head(titanic)
 ```
 
 ```{R}
@@ -55,51 +61,6 @@ ggplot(titanic_miss, aes(x = Age_miss)) +
   )
 
 # Alternatively, packages like naniar or VIM can create specialized missing-data plots.
-```
-
-```{R}
-########################################
-# 4) Univariate Distributions
-########################################
-
-# A) Distribution of Age
-ggplot(titanic, aes(x = Age)) +
-  geom_histogram(bins = 30, na.rm = TRUE) +
-  labs(
-    title = "Distribution of Passengers' Age",
-    x = "Age",
-    y = "Count"
-  )
-
-# B) Distribution of Fare (if you have "Fare" column)
-# (If 'Fare' isn't in your snippet, just skip)
-if ("Fare" %in% colnames(titanic)) {
-  ggplot(titanic, aes(x = Fare)) +
-    geom_histogram(bins = 30, na.rm = TRUE) +
-    labs(
-      title = "Distribution of Ticket Fare",
-      x = "Fare",
-      y = "Count"
-    )
-}
-
-# C) Categorical distribution: Sex
-ggplot(titanic, aes(x = Sex)) +
-  geom_bar() +
-  labs(
-    title = "Passenger Count by Sex",
-    x = "Sex",
-    y = "Count"
-  )
-
-# D) Passenger Class
-ggplot(titanic, aes(x = factor(Pclass))) +
-  geom_bar() +
-  labs(
-    title = "Passenger Count by Class",
-    x = "Passenger Class",
-    y = "Count"
-  )
 ```
 
 ```{R}
@@ -180,84 +141,225 @@ num_data <- num_data[complete.cases(num_data), ]  # optional: remove rows w/ NAs
 cor(num_data)
 
 ```
+
 ```{R}
-titanic_clean <- titanic %>%
-  select(-c(Name, Ticket, Cabin, Fare, Embarked))  # or Cabin as well if present
+clean_titanic <- function(df, is_train = TRUE) {
+  df <- df %>%
+    # 1) Survived → factor("No","Yes") if training data
+    { if (is_train) mutate(., 
+        Survived = factor(Survived, levels = c(0,1), labels = c("No","Yes"))
+      ) else . } %>%
+    
+    # 2) Pclass → ordered factor
+    mutate(Pclass = factor(Pclass, levels = c(1,2,3), ordered = TRUE)) %>%
+    
+    # 3) Sex → factor
+    mutate(Sex = factor(Sex, levels = c("male","female"))) %>%
+    
+    # 4) Age → impute missing with median
+    { 
+      med_age <- median(.$Age, na.rm = TRUE)
+      mutate(., Age = ifelse(is.na(Age), med_age, Age))
+    } %>%
+    
+    # 5) Fare → impute missing with median, then log-transform
+    { 
+      med_fare <- median(.$Fare, na.rm = TRUE)
+      tmp <- mutate(., Fare = ifelse(is.na(Fare), med_fare, Fare))
+      mutate(tmp, LogFare = log1p(Fare))
+    } %>%
+    
+    # 6) Embarked → impute missing/"" with mode, then factor
+    { 
+      if ("Embarked" %in% names(.)) {
+        tmp <- .
+        tmp$Embarked[tmp$Embarked == ""] <- NA
+        mode_port <- names(which.max(table(tmp$Embarked)))
+        tmp$Embarked[is.na(tmp$Embarked)] <- mode_port
+        tmp$Embarked <- factor(tmp$Embarked)
+        tmp
+      } else .
+    } %>%
+    
+    # 7) Title → extract from Name, group rares, factor
+    mutate(
+      Title = sub("^.*, (.*?)\\..*$", "\\1", Name),
+      Title = case_when(
+        Title %in% c("Mlle","Ms")                        ~ "Miss",
+        Title %in% c("Mme","Countess","Lady","Dona")     ~ "Mrs",
+        Title %in% c("Capt","Col","Major","Dr","Rev",
+                     "Don","Sir","Jonkheer","the Countess") ~ "Rare",
+        TRUE                                             ~ Title
+      ),
+      Title = factor(Title)
+    ) %>%
+    
+    # 8) FamilySize
+    mutate(FamilySize = SibSp + Parch + 1) %>%
+    
+    # 9) AgeGroup → bin Age into categories, ordered factor
+    mutate(
+      AgeGroup = cut(
+        Age,
+        breaks = c(0,12,19,40,60,Inf),
+        labels = c("Child","Teen","Adult","Middle_Aged","Senior"),
+        right = FALSE
+      ),
+      AgeGroup = factor(
+        AgeGroup,
+        levels = c("Child","Teen","Adult","Middle_Aged","Senior"),
+        ordered = TRUE
+      )
+    )
+  
+  return(df)
+}
 
-titanic_clean <- titanic_clean %>%
-  mutate(
-    Survived = factor(Survived, levels = c(0,1)),
-    Pclass   = factor(Pclass,  levels = c(1,2,3), ordered = TRUE),
-    Sex      = factor(Sex,     levels = c("male","female"))
-  )
+```
 
-median_age <- median(titanic_clean$Age, na.rm = TRUE)
-titanic_clean$Age[is.na(titanic_clean$Age)] <- median_age
+
+```{R}
+titanic_clean <- clean_titanic(titanic)
+head(titanic_clean)
 ```
 
 ```{R}
-rf_model <- randomForest(
-  Survived ~ Pclass + Sex + Age + SibSp + Parch,
-  data    = titanic_clean,
-  ntree   = 500,       # default is 500, can adjust
-  mtry    = 2,         # default ~ sqrt(#predictors), can tune
-  importance = TRUE     # request variable importance
+# ---- data-prep ----
+# assume titanic_clean already has:
+# Survived(No/Yes), Pclass, Sex, Age, SibSp, Parch, Embarked,
+# Title, FamilySize, LogFare, AgeGroup
+
+# Add Embarked if missing:
+titanic_clean$Embarked <- factor(titanic_clean$Embarked)
+
+# Choose features
+features <- c("Pclass","Sex","Age","SibSp","Parch",
+              "Embarked","Title","FamilySize","LogFare","AgeGroup")
+
+# Create model matrix (one-hot encode factors)
+dummies <- dummyVars(~ ., data = titanic_clean[,features])
+X <- predict(dummies, newdata = titanic_clean[,features])
+X <- as(Matrix(X), "dgCMatrix")
+
+# Label: 0/1 numeric
+y <- ifelse(titanic_clean$Survived == "Yes", 1, 0)
+
+# Create DMatrix
+dtrain <- xgb.DMatrix(data = X, label = y)
+# ---- xgb-train ----
+params <- list(
+  objective = "binary:logistic",
+  eval_metric = "error",    # classification error
+  eta = 0.1,
+  max_depth = 6,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  gamma = 0
 )
 
-# Print the model summary
-print(rf_model)
+set.seed(123)
+xgb_model <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 200,
+  watchlist = list(train = dtrain),
+  verbose = 0
+)
 
-# Check variable importance
-importance(rf_model)
-varImpPlot(rf_model)
 ```
+
+
+```{R}
+# ---- importance ----
+# Get importance matrix
+imp <- xgb.importance(
+  feature_names = colnames(X),
+  model = xgb_model
+)
+
+# View top 10
+print(imp)
+
+# Plot importance
+xgb.plot.importance(imp)
+
+```
+
+
+```{R}
+# ---- gradient-boosted-trees ----
+# Using xgboost with caret
+
+# For xgboost, we need numeric or dummy variables for factors (caret handles this if we let it).
+# Survived must be numeric for xgboost typically, but caret automatically encodes factors.
+# Just ensure the formula interface is used or convert Survived to a factor with levels 0/1.
+
+train_control_xgb <- trainControl(
+  method = "cv",
+  number = 5,
+  search="random",
+  verboseIter = FALSE
+)
+
+# Some typical xgboost tuning parameters for caret's "xgbTree" method:
+# nrounds, max_depth, eta, gamma, colsample_bytree, min_child_weight, subsample, etc.
+
+tune_grid_xgb <- expand.grid(
+  nrounds          = c(100, 200, 300),
+  max_depth        = c(5, 7, 9, 11),
+  eta              = c(0.01, 0.1, 0.3),
+  gamma            = c(0, 1),
+  colsample_bytree = c(0.5, 0.8, 1.0),
+  min_child_weight = c(1, 3, 5),
+  subsample        = c(0.5, 0.8, 1.0)
+)
+
+set.seed(123)
+suppressWarnings({
+  xgb_expanded <- train(
+    Survived ~ Pclass + Sex + Age + FamilySize + LogFare + Title + SibSp,
+    data      = titanic_clean,
+    method    = "xgbTree",
+    trControl = train_control_xgb,
+    tuneGrid  = tune_grid_xgb,
+    metric    = "Accuracy",
+    tuneLength = 25
+  )
+})
+
+xgb_expanded
+# Check best results
+best_xgb <- xgb_expanded$bestTune
+best_xgb
+pred_train_xgb <- predict(xgb_expanded, titanic_clean)
+conf_mat_xgb   <- table(predicted = pred_train_xgb, actual = titanic_clean$Survived)
+accuracy_xgb   <- sum(diag(conf_mat_xgb)) / sum(conf_mat_xgb)
+accuracy_xgb
+```
+
 
 ```{R}
 # Read the test data
 test_data <- read.csv("/Users/lincolnmercuro/Downloads/titanic/test.csv", stringsAsFactors = FALSE)
 
-# Perform similar cleaning as done on the training data:
-# For example, keep only the columns you'll use,
-# convert appropriate columns to factors, and impute missing values.
-test_clean <- test_data %>%
-  # Select only columns needed for prediction. Adjust if needed.
-  select(PassengerId, Pclass, Sex, Age, SibSp, Parch, Fare, Embarked) %>%
-  mutate(
-    Pclass = factor(Pclass, levels = c(1, 2, 3), ordered = TRUE),
-    Sex    = factor(Sex, levels = c("male", "female"))
-  )
+test_clean <- clean_titanic(test_data, is_train=FALSE)
 
-# Impute missing Age values with the median Age from the training set
-# (Assuming you calculated this from your cleaned training data, titanic_clean)
-median_age <- median(titanic_clean$Age, na.rm = TRUE)
-test_clean$Age[is.na(test_clean$Age)] <- median_age
+predictions <- predict(xgb_expanded, newdata = test_clean)
 
-# Similarly, you might need to handle missing Fare or Embarked values if they exist:
-# For example:
-# test_clean$Fare[is.na(test_clean$Fare)] <- median(test_clean$Fare, na.rm = TRUE)
-# test_clean$Embarked[test_clean$Embarked == ""] <- "S"   # if "S" is the most common port
+# If predictions are factors with levels "0" and "1", Kaggle can generally handle that.
+# But to be safe, we can explicitly convert them to numeric 0/1:
+predictions_numeric <- ifelse(predictions == "Yes", 1, 0)
 
-#############################################
-# STEP 2: Generate Predictions with rf_model
-#############################################
-
-# Use the previously trained random forest model (rf_model) to predict Survival.
-# (Make sure rf_model was trained on similar feature columns)
-predictions <- predict(rf_model, newdata = test_clean)
-
-#############################################
-# STEP 3: Create a Submission File
-#############################################
-
-# Create a data frame with PassengerId and Survived predictions.
+# ---- submission-file ----
+# Create the submission data frame.
 submission <- data.frame(
   PassengerId = test_clean$PassengerId,
-  Survived = predictions
+  Survived    = predictions_numeric
 )
 
-# Preview the submission
+# Preview the first few rows:
 head(submission)
 
-# Write the submission to a CSV file (without row names)
+# Write out to CSV (no row names)
 write.csv(submission, file = "submission.csv", row.names = FALSE)
 ```
