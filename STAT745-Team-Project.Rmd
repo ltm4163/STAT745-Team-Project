@@ -19,7 +19,6 @@ library(xgboost)     # for gradient boosting
 library(Matrix)
 library(glmnet)
 set.seed(123)        # for reproducibility
-source("clean_data.R")
 ```
 
 ```{R}
@@ -146,7 +145,12 @@ cor(num_data)
 
 
 ```{R}
+# ---- data-prep ----
+# assume titanic_clean already has:
+# Survived(No/Yes), Pclass, Sex, Age, SibSp, Parch, Embarked,
+# Title, FamilySize, LogFare, AgeGroup
 titanic_clean <- clean_titanic(titanic)
+
 # Add Embarked if missing:
 titanic_clean$Embarked <- factor(titanic_clean$Embarked)
 
@@ -184,4 +188,90 @@ xgb_model <- xgb.train(
   verbose = 0
 )
 
+```
+
+
+```{R}
+# ---- importance ----
+# Get importance matrix
+imp <- xgb.importance(
+  feature_names = colnames(X),
+  model = xgb_model
+)
+
+# View top 10
+print(imp)
+
+# Plot importance
+xgb.plot.importance(imp)
+
+```
+
+
+
+```{R}
+train_data <- clean_titanic(titanic)
+
+train_control <- trainControl(
+  method = "repeatedcv", 
+  number = 5,     # 5-fold
+  repeats = 3,    # repeated 3x
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary
+)
+
+model_methods <- c("glm", 
+                   "rf", 
+                   "xgbTree", 
+                   "rpart", 
+                   "gbm", 
+                   "svmRadial", 
+                   "knn", 
+                   "nnet")  # optional if you want neural nets
+
+formula <- Survived ~ Pclass + Sex + LogFare + Embarked + Title + FamilySize + AgeGroup
+
+# A helper function to train one model:
+train_one_model <- function(method_name, formula, data, train_control) {
+  set.seed(123)  # or a different seed if you want each model to have a distinct seed
+  train(
+    formula,
+    data      = data,
+    method    = method_name,
+    trControl = train_control,
+    metric    = "Accuracy",      # or "Accuracy", "Kappa", etc.
+    tuneLength = 5,         # basic tuning search
+    # Optional: If you prefer a custom tuneGrid:
+    # tuneGrid = data.frame( ... )  
+    preProcess = c("center","scale")  # many models like scaled data
+  )
+}
+
+# Apply to each method
+all_models <- lapply(model_methods, train_one_model, 
+                     formula        = formula, 
+                     data           = train_data, 
+                     train_control  = train_control)
+
+# Give names to the list elements so we know which is which
+names(all_models) <- model_methods
+```
+
+
+```{R}
+results <- resamples(all_models)
+
+# Print a summary of cross-validated statistics for each model
+summary(results)
+
+# Visual comparison (dotplot of ROC by default)
+dotplot(results, metric = "ROC")
+```
+
+```{R}
+best_model <- all_models[["rf"]]
+
+# Predict on validation
+valid_preds <- predict(best_model, newdata = valid_data, type = "raw")
+confusionMatrix(valid_preds, valid_data$Survived, positive = "Yes")
 ```
