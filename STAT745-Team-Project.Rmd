@@ -17,6 +17,7 @@ library(ranger)      # for method = "ranger" in caret
 library(caret)       # for easy model tuning and cross-validation
 library(xgboost)     # for gradient boosting
 library(Matrix)
+library(glmnet)
 set.seed(123)        # for reproducibility
 ```
 
@@ -145,11 +146,10 @@ cor(num_data)
 ```{R}
 clean_titanic <- function(df, is_train = TRUE) {
   df <- df %>%
-    # 1) Survived → factor("No","Yes") if training data
+  # 1) Survived → factor("No","Yes") if training data
     { if (is_train) mutate(., 
         Survived = factor(Survived, levels = c(0,1), labels = c("No","Yes"))
       ) else . } %>%
-    
     # 2) Pclass → ordered factor
     mutate(Pclass = factor(Pclass, levels = c(1,2,3), ordered = TRUE)) %>%
     
@@ -185,8 +185,8 @@ clean_titanic <- function(df, is_train = TRUE) {
     mutate(
       Title = sub("^.*, (.*?)\\..*$", "\\1", Name),
       Title = case_when(
-        Title %in% c("Mlle","Ms", "Miss", "Mrs")                        ~ "Other",
-        Title %in% c("Mme","Countess","Lady","Dona")     ~ "Other",
+        Title %in% c("Mlle","Ms")                        ~ "Miss",
+        Title %in% c("Mme","Countess","Lady","Dona")     ~ "Mrs",
         Title %in% c("Capt","Col","Major","Dr","Rev",
                      "Don","Sir","Jonkheer","the Countess") ~ "Other",
         TRUE                                             ~ Title
@@ -297,7 +297,6 @@ xgb.plot.importance(imp)
 train_control_xgb <- trainControl(
   method = "cv",
   number = 5,
-  search="random",
   verboseIter = FALSE
 )
 
@@ -305,7 +304,7 @@ train_control_xgb <- trainControl(
 # nrounds, max_depth, eta, gamma, colsample_bytree, min_child_weight, subsample, etc.
 
 tune_grid_xgb <- expand.grid(
-  nrounds          = c(100, 200, 300),
+  nrounds          = c(100, 200, 300, 400),
   max_depth        = c(5, 7, 9, 11),
   eta              = c(0.01, 0.1, 0.3),
   gamma            = c(0, 1),
@@ -323,7 +322,6 @@ suppressWarnings({
     trControl = train_control_xgb,
     tuneGrid  = tune_grid_xgb,
     metric    = "Accuracy",
-    tuneLength = 25
   )
 })
 ```
@@ -375,3 +373,100 @@ head(submission)
 # Write out to CSV (no row names)
 write.csv(submission, file = "submission.csv", row.names = FALSE)
 ```
+
+```{R}
+# Read in the training data (adjust path as needed)
+train_raw <- read.csv("train.csv")
+
+# Use your cleaning function
+train_cleaned <- clean_titanic(train_raw)
+
+set.seed(42)  # for reproducibility
+split_idx <- createDataPartition(train_cleaned$Survived, p = 0.8, list = FALSE)
+train_data <- train_cleaned[split_idx, ]
+val_data   <- train_cleaned[-split_idx, ]
+
+
+head(train_cleaned)
+
+```
+
+```{R}
+# Set up cross-validation
+ctrl <- trainControl(
+  method = "cv",
+  number = 5,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary
+)
+
+# Train a GLM (logistic regression) model via caret
+# Feel free to drop or add predictors based on exploration
+glm_model <- train(
+  Survived ~ Pclass + Sex + Age + LogFare + Embarked + Title + FamilySize + AgeGroup,
+  data = train_data,
+  method = "glm",
+  family = binomial,
+  metric = "Accuracy",
+  trControl = ctrl
+)
+
+# Check the model results
+glm_model
+
+```
+
+```{R}
+# Predict on validation set
+val_preds <- predict(glm_model, newdata = val_data)
+
+# Confusion matrix
+confusionMatrix(val_preds, val_data$Survived)
+
+```
+
+
+```{R}
+train_raw <- read.csv("train.csv")
+train_cleaned <- clean_titanic(train_raw, is_train = TRUE)
+
+# Convert Survived to factor with names "No" and "Yes"
+train_cleaned$Survived <- factor(
+  train_cleaned$Survived,
+  levels = c(0, 1),
+  labels = c("No", "Yes")
+)
+
+# Fit a logistic regression on the entire training set
+final_glm <- glm(
+  Survived ~ Pclass + Sex + Age + LogFare + Embarked + Title + FamilySize + AgeGroup,
+  data = train_cleaned,
+  family = binomial
+)
+
+# Quick summary (optional)
+summary(final_glm)
+
+test_raw <- read_csv("test.csv")
+test_cleaned <- clean_titanic(test_raw, is_train = FALSE)
+
+# Predict probabilities
+test_probs <- predict(final_glm, newdata = test_cleaned, type = "response")
+
+# Convert probabilities to 0/1
+test_preds <- ifelse(test_probs > 0.5, 1, 0)
+
+submission <- data.frame(
+  PassengerId = test_cleaned$PassengerId,
+  Survived    = test_preds
+)
+
+# Write to CSV
+write_csv(submission, "submission_glm.csv")
+
+# Preview
+head(submission)
+
+```
+
+
